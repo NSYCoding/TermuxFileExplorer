@@ -87,7 +87,7 @@ async function load(p = cwd) {
       <span class="acts">${runnable ? '<button data-a="run">Run</button>' : ''}${it.dir ? '<button data-a="serve">Serve</button>' : '<button data-a="dl">⬇</button>'}<button data-a="ren">✎</button><button data-a="del" class="danger">✕</button></span>`;
     row.onclick = (e) => {
       const a = e.target.dataset.a;
-      if (!a) return it.dir ? load(full) : open(full, it);
+      if (!a) return it.dir ? load(full) : openFile(full, it);
       e.stopPropagation(); action(a, full, it);
     };
     $('#list').append(row);
@@ -103,10 +103,11 @@ async function action(a, full, it) {
   else if (a === 'run') { await call('POST', '/api/run', { path: full }); $('#side').classList.add('open'); refreshSide(); }
 }
 
-async function open(full, it) {
+async function openFile(full, it) {
   if (IMG.test(it.name) || /\.(pdf|mp4|mp3)$/i.test(it.name)) return window.open('/api/file?path=' + enc(full));
   if (!TEXT.test(it.name) && it.size > 2e6) return action('dl', full, it);
   const r = await fetch('/api/file?text=1&path=' + enc(full));
+  if (!r.ok) return toast((await r.json().catch(() => ({}))).error || 'Cannot open file');
   editing = full; $('#etitle').textContent = full; $('#etext').value = await r.text(); $('#editor').classList.add('open');
 }
 $('#esave').onclick = async () => { await call('PUT', '/api/file?path=' + enc(editing), $('#etext').value, true); toast2('Saved'); };

@@ -14,6 +14,7 @@ const { spawn } = require('child_process');
 const args = process.argv.slice(2);
 const pi = args.indexOf('--port');
 const PORT = pi >= 0 ? Number(args.splice(pi, 2)[1]) : 8080;
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) { console.error('Invalid --port'); process.exit(1); }
 const ROOT = path.resolve(args[0] || process.env.HOME || process.cwd());
 const TOKEN = crypto.randomBytes(12).toString('hex');
 const PUBLIC = path.join(__dirname, 'public');
@@ -25,7 +26,10 @@ const MIME = {
   '.webp': 'image/webp', '.ico': 'image/x-icon', '.txt': 'text/plain', '.md': 'text/plain',
   '.mp3': 'audio/mpeg', '.mp4': 'video/mp4', '.pdf': 'application/pdf', '.wasm': 'application/wasm',
 };
-const mime = (f) => (MIME[path.extname(f).toLowerCase()] || 'application/octet-stream');
+const mime = (f) => {
+  const t = MIME[path.extname(f).toLowerCase()] || 'application/octet-stream';
+  return /^text\/|json$|javascript$|svg/.test(t) ? t + '; charset=utf-8' : t;
+};
 
 // Interpreter chosen by extension for the "Run" button.
 const RUNNERS = {
@@ -38,6 +42,11 @@ function safe(rel) {
   const full = path.resolve(ROOT, '.' + path.sep + (rel || ''));
   if (full !== ROOT && !full.startsWith(ROOT + path.sep)) throw httpErr(403, 'Outside root');
   return full;
+}
+// A single, safe file name: no separators, no "." / "..".
+function safeName(n) {
+  if (typeof n !== 'string' || !n || n === '.' || n === '..' || /[\/\\\0]/.test(n)) throw httpErr(400, 'Invalid name');
+  return n;
 }
 function httpErr(status, msg) { const e = new Error(msg); e.status = status; return e; }
 const toRel = (full) => path.relative(ROOT, full).split(path.sep).join('/');
@@ -67,11 +76,12 @@ function startStatic(dir, port) {
         if (full !== dir && !full.startsWith(dir + path.sep)) { res.writeHead(403); return res.end('Forbidden'); }
         let st = await fsp.stat(full).catch(() => null);
         if (st && st.isDirectory()) {
+          if (!p.endsWith('/')) { res.writeHead(301, { Location: encodeURI(p) + '/' }); return res.end(); }
           const idx = path.join(full, 'index.html');
           if (await fsp.stat(idx).catch(() => null)) { full = idx; st = await fsp.stat(idx); }
           else {
             const names = (await fsp.readdir(full)).sort();
-            const base = p.endsWith('/') ? p : p + '/';
+            const base = p;
             const html = '<!doctype html><meta name=viewport content="width=device-width"><body style="font:16px sans-serif"><h3>Index of ' + escapeHtml(p) + '</h3>' +
               names.map((n) => `<div><a href="${encodeURI(base + n)}">${escapeHtml(n)}</a></div>`).join('');
             res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(html);
@@ -97,7 +107,7 @@ function runFile(full) {
   const runner = RUNNERS[ext];
   if (!runner) throw httpErr(400, `No runner for "${ext}" files`);
   const id = ++procSeq;
-  const child = spawn(runner[0], [...runner.slice(1), full], { cwd: path.dirname(full), env: process.env });
+  const child = spawn(runner[0], [...runner.slice(1), full], { cwd: path.dirname(full), env: process.env, detached: true });
   const p = { id, file: toRel(full), cmd: `${runner[0]} ${path.basename(full)}`, log: '', running: true, code: null, child };
   const add = (d) => { p.log = (p.log + d).slice(-100000); };
   child.stdout.on('data', add); child.stderr.on('data', add);
@@ -105,6 +115,10 @@ function runFile(full) {
   child.on('close', (c) => { p.running = false; p.code = c; add(`\n[exited ${c}]\n`); });
   procs.set(id, p);
   return p;
+}
+function killProc(p) {
+  if (!p || !p.running) return;
+  try { process.kill(-p.child.pid, 'SIGTERM'); } catch { p.child.kill(); }
 }
 const pubProc = ({ child, ...p }) => p;
 
@@ -148,8 +162,7 @@ async function api(req, res, url) {
     }
 
     case 'POST /api/upload': { // raw body, ?path=dir&name=file
-      const name = path.basename(q.get('name') || '');
-      if (!name) throw httpErr(400, 'Missing name');
+      const name = safeName(q.get('name'));
       const f = path.join(safe(q.get('path')), name);
       await new Promise((ok, no) => { const w = fs.createWriteStream(f); req.pipe(w); w.on('finish', ok); w.on('error', no); req.on('error', no); });
       return send(res, 200, { ok: true });
@@ -157,19 +170,20 @@ async function api(req, res, url) {
 
     case 'POST /api/mkdir': {
       const b = await readJson(req);
-      await fsp.mkdir(path.join(safe(b.path), path.basename(b.name)), { recursive: true });
+      await fsp.mkdir(path.join(safe(b.path), safeName(b.name)), { recursive: true });
       return send(res, 200, { ok: true });
     }
     case 'POST /api/newfile': {
       const b = await readJson(req);
-      await fsp.writeFile(path.join(safe(b.path), path.basename(b.name)), '', { flag: 'wx' });
+      await fsp.writeFile(path.join(safe(b.path), safeName(b.name)), '', { flag: 'wx' });
       return send(res, 200, { ok: true });
     }
     case 'POST /api/rename': {
       const b = await readJson(req);
       const from = safe(b.path);
-      const to = path.join(path.dirname(from), path.basename(b.name));
+      const to = path.join(path.dirname(from), safeName(b.name));
       if (from === ROOT) throw httpErr(400, 'Cannot rename root');
+      if (await fsp.lstat(to).catch(() => null)) throw httpErr(409, 'A file with that name already exists');
       await fsp.rename(from, to);
       return send(res, 200, { ok: true });
     }
@@ -207,7 +221,7 @@ async function api(req, res, url) {
     }
     case 'POST /api/kill': {
       const b = await readJson(req);
-      procs.get(Number(b.id))?.child.kill();
+      killProc(procs.get(Number(b.id)));
       return send(res, 200, { ok: true });
     }
   }
@@ -229,7 +243,11 @@ const main = http.createServer(async (req, res) => {
     }
     if (cookieOf(req) !== TOKEN) return send(res, 401, 'Open the full URL printed in Termux (includes ?token=…).', 'text/plain');
 
-    if (url.pathname.startsWith('/api/')) return await api(req, res, url);
+    if (url.pathname.startsWith('/api/')) {
+      const o = req.headers.origin;
+      if (o && new URL(o).host !== req.headers.host) return send(res, 403, { error: 'Cross-origin request blocked' });
+      return await api(req, res, url);
+    }
 
     const file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
     const full = path.resolve(PUBLIC, file);
@@ -248,4 +266,4 @@ main.listen(PORT, '127.0.0.1', () => {
   console.log(`Termux File Explorer\n  root: ${ROOT}\n  open: http://localhost:${PORT}/?token=${TOKEN}\n`);
 });
 main.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `Port ${PORT} busy; try --port N` : e.message); process.exit(1); });
-process.on('SIGINT', () => { procs.forEach((p) => p.child.kill()); process.exit(0); });
+process.on('SIGINT', () => { procs.forEach(killProc); process.exit(0); });
