@@ -15,8 +15,18 @@ const args = process.argv.slice(2);
 const pi = args.indexOf('--port');
 const PORT = pi >= 0 ? Number(args.splice(pi, 2)[1]) : 8080;
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) { console.error('Invalid --port'); process.exit(1); }
+
+const ai = args.indexOf('--no-auth');
+const NO_AUTH = ai >= 0 && !!args.splice(ai, 1);
+// Keep the token across restarts so an old bookmark/link keeps working.
 const ROOT = path.resolve(args[0] || process.env.HOME || process.cwd());
-const TOKEN = crypto.randomBytes(12).toString('hex');
+const TOKEN_FILE = path.join(process.env.HOME || __dirname, '.termux-explorer-token');
+const TOKEN = (() => {
+  try { const t = fs.readFileSync(TOKEN_FILE, 'utf8').trim(); if (/^[a-f0-9]{24}$/.test(t)) return t; } catch {}
+  const t = crypto.randomBytes(12).toString('hex');
+  try { fs.writeFileSync(TOKEN_FILE, t, { mode: 0o600 }); } catch {}
+  return t;
+})();
 const PUBLIC = path.join(__dirname, 'public');
 
 const MIME = {
@@ -237,11 +247,19 @@ const main = http.createServer(async (req, res) => {
     if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.host || '')) return send(res, 403, { error: 'Bad host' });
     const url = new URL(req.url, 'http://localhost');
 
+    if (NO_AUTH && cookieOf(req) !== TOKEN) { // no-auth mode: hand out the cookie automatically
+      res.setHeader('Set-Cookie', `wbtoken=${TOKEN}; HttpOnly; SameSite=Strict; Path=/`);
+      req.headers.cookie = `wbtoken=${TOKEN}`;
+    }
     if (url.searchParams.get('token') === TOKEN) { // first visit: set cookie, strip token from URL
       res.writeHead(302, { 'Set-Cookie': `wbtoken=${TOKEN}; HttpOnly; SameSite=Strict; Path=/`, Location: '/' });
       return res.end();
     }
-    if (cookieOf(req) !== TOKEN) return send(res, 401, 'Open the full URL printed in Termux (includes ?token=…).', 'text/plain');
+    if (cookieOf(req) !== TOKEN) {
+      return send(res, 401, '<!doctype html><meta name=viewport content="width=device-width"><body style="font:16px sans-serif;padding:20px">' +
+        '<h3>Termux Explorer</h3><p>Enter the token printed in Termux (or run <code>cat ~/.termux-explorer-token</code>).</p>' +
+        '<form onsubmit="location=\'/?token=\'+encodeURIComponent(t.value.trim());return false"><input id=t autofocus style="font:inherit;width:100%;padding:8px"><br><br><button style="font:inherit;padding:8px 16px">Open</button></form>', 'text/html');
+    }
 
     if (url.pathname.startsWith('/api/')) {
       const o = req.headers.origin;
@@ -263,7 +281,9 @@ const main = http.createServer(async (req, res) => {
 });
 
 main.listen(PORT, '127.0.0.1', () => {
-  console.log(`Termux File Explorer\n  root: ${ROOT}\n  open: http://localhost:${PORT}/?token=${TOKEN}\n`);
+  console.log(`Termux File Explorer\n  root: ${ROOT}`);
+  console.log(NO_AUTH ? `  open: http://localhost:${PORT}/  (no token needed)\n`
+    : `  open: http://localhost:${PORT}/\n  token: ${TOKEN}\n  or:   http://localhost:${PORT}/?token=${TOKEN}\n`);
 });
 main.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `Port ${PORT} busy; try --port N` : e.message); process.exit(1); });
 process.on('SIGINT', () => { procs.forEach(killProc); process.exit(0); });

@@ -12,8 +12,9 @@ git clone <this repo> && cd WebBuilder/termux-explorer
 node server.js                # optional: node server.js ~/projects --port 9000
 ```
 
-It prints a URL like `http://localhost:8080/?token=…`. Open that in your phone browser. The token sets a
-cookie on the first visit.
+Open `http://localhost:8080/` in your phone browser. The first time, the page asks for the token. It is printed
+in Termux, and also saved in `~/.termux-explorer-token`, so it stays the same across restarts. You can also open
+the printed `?token=…` link. If you only use it on your own phone, `node server.js --no-auth` skips the token entirely.
 
 ## Features
 
@@ -27,6 +28,6 @@ cookie on the first visit.
 ## Security
 
 - Binds to `127.0.0.1` only and rejects non-loopback `Host` headers
-- A random token is required (printed at startup, regenerated each run)
+- A random token is required unless you pass `--no-auth` (stored in `~/.termux-explorer-token`, mode 600)
 - All paths are confined to the root directory (default `$HOME`)
 - Run executes real code with your Termux permissions, so don't expose the port with a tunnel or proxy
